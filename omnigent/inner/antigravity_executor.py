@@ -33,15 +33,22 @@ to this runtime too:
 
 - TOOL_CALL phase: a registered ``PreToolCallDecideHook`` consults the
   executor's ``_policy_evaluator`` BEFORE each tool runs. A DENY verdict blocks
-  the call (the SDK rejects it without executing the tool — for both its
-  bundled native tools and the bridged Omnigent tools, see
+  the call (the SDK rejects it without executing the tool — chiefly its bundled
+  native tools; bridged Omnigent tools are skipped here because they are already
+  TOOL_CALL-gated server-side on the dispatch path, see
   :meth:`_build_pre_tool_hook`); an ASK verdict routes through the executor's
-  ``_elicitation_handler`` (deny when none is wired). This is the
-  ``can_use_tool`` gate of :class:`~omnigent.inner.claude_sdk_executor.ClaudeSDKExecutor`,
+  ``_elicitation_handler`` (deny when none is wired). The bridged skip set is
+  bound per-agent into the hook closure (not stored on the executor) and a
+  bundled native tool is gated even if its wire name collides with a bridged
+  name, so a colliding name can't bypass policy. This is the ``can_use_tool``
+  gate of :class:`~omnigent.inner.claude_sdk_executor.ClaudeSDKExecutor`,
   expressed through the SDK's decide-hook surface.
 - LLM_REQUEST / LLM_RESPONSE phases: :meth:`run_turn` evaluates these around
   the model call (deny-before-spawn / deny-after-stream), matching the peer
-  executors so prompt-deny and output-block policies are honored.
+  executors so prompt-deny and turn-completion-block policies are honored. As
+  in the peers, response text streams live, so an LLM_RESPONSE DENY blocks
+  TurnComplete (and persistence) but does not un-send already-emitted deltas;
+  see the note at the LLM_RESPONSE block in :meth:`run_turn`.
 
 Both ``_policy_evaluator`` and ``_elicitation_handler`` are wired in by the
 harness ExecutorAdapter; every phase is a no-op when the evaluator is absent.
@@ -93,6 +100,28 @@ logger = logging.getLogger(__name__)
 
 # Default model when neither spec nor provider pins one.
 _ANTIGRAVITY_DEFAULT_MODEL = "gemini-3.5-flash"
+
+# Wire names of the SDK's bundled native tools (``BuiltinTools`` enum values),
+# used as the fallback "is this a native tool?" set when the live enum can't be
+# resolved (e.g. the SDK isn't importable, or a test stub omits it). The live
+# enum is preferred at runtime (see :func:`_native_tool_wire_names`); this
+# mirror only guards drift / absence. Kept in sync with
+# ``google.antigravity.types.BuiltinTools``.
+_NATIVE_TOOL_WIRE_NAMES: frozenset[str] = frozenset(
+    {
+        "list_directory",
+        "search_directory",
+        "find_file",
+        "view_file",
+        "create_file",
+        "edit_file",
+        "run_command",
+        "ask_question",
+        "start_subagent",
+        "generate_image",
+        "finish",
+    }
+)
 
 # Sentinel the producer pushes when the step stream is exhausted, so the
 # consumer can distinguish "turn finished" from a queued event.
@@ -247,6 +276,58 @@ def _enum_name(value: Any) -> str:  # type: ignore[explicit-any]
     return name if isinstance(name, str) else ""
 
 
+def _native_tool_wire_names(antigravity: ModuleType) -> frozenset[str]:
+    """Resolve the wire names of the SDK's bundled native tools.
+
+    Reads ``google.antigravity.types.BuiltinTools`` member ``.value``\\ s when
+    present, falling back to :data:`_NATIVE_TOOL_WIRE_NAMES` when the enum is
+    missing (e.g. a test stub) or unreadable. Used by the pre-tool decide hook
+    to keep native tools policy-gated even when a native tool's wire name
+    collides with a bridged tool name.
+
+    :param antigravity: The imported ``google.antigravity`` module (the fake
+        SDK module under test).
+    :returns: The native tool wire names, or the static fallback set.
+    """
+    builtin = getattr(getattr(antigravity, "types", None), "BuiltinTools", None)
+    if builtin is None:
+        return _NATIVE_TOOL_WIRE_NAMES
+    try:
+        names = {member.value for member in builtin if isinstance(member.value, str)}
+    except TypeError:
+        # Not iterable as an enum — fall back to the static mirror.
+        return _NATIVE_TOOL_WIRE_NAMES
+    return frozenset(names) or _NATIVE_TOOL_WIRE_NAMES
+
+
+def _is_native_tool_call(data: SDKToolCall, native_wire_names: frozenset[str]) -> bool:
+    """Whether a pending ``ToolCall`` is one of the SDK's bundled native tools.
+
+    Two independent signals, either of which marks the call native:
+
+    - **Enum-typed name** — ``ToolCall.name`` is a ``BuiltinTools`` enum member
+      for native tools and a plain ``str`` for bridged / custom callables
+      (``name: BuiltinTools | str`` in the SDK). The enum check is the precise
+      discriminator: a native call is native even if its wire name equals a
+      bridged tool's name.
+    - **Native wire name** — the resolved wire name is in *native_wire_names*.
+      Covers SDKs (and test stubs) that pass native names as plain strings.
+
+    Either signal forces the call to be policy-gated rather than skipped as a
+    bridged tool, closing the name-collision bypass.
+
+    :param data: The SDK ``ToolCall`` presented to the pre-tool hook.
+    :param native_wire_names: The native tool wire names for this agent's SDK.
+    :returns: ``True`` when the call targets a bundled native tool.
+    """
+    raw_name = getattr(data, "name", None)
+    # A ``BuiltinTools`` enum member exposes ``.value`` (the wire name) and is
+    # not a bare ``str``; bridged callables always present a bare ``str`` name.
+    if not isinstance(raw_name, str) and isinstance(getattr(raw_name, "value", None), str):
+        return True
+    return _tool_name(raw_name) in native_wire_names
+
+
 @dataclass
 class _PendingTool:
     """A tool call awaiting its completion event.
@@ -348,12 +429,6 @@ class AntigravityExecutor(Executor):
         # phase is a no-op until the adapter installs it. Declared here for
         # discoverability; the adapter owns assignment.
         self._policy_evaluator: PolicyEvaluator | None = None
-        # Names of the tools bridged through ``_tool_executor`` this turn (the
-        # Omnigent tools exposed as SDK callables). The pre-tool decide hook
-        # skips these — they are TOOL_CALL-gated server-side on the dispatch
-        # path — and gates everything else (chiefly the SDK's native tools).
-        # Refreshed at the start of each turn from the turn's tool set.
-        self._bridged_tool_names: frozenset[str] = frozenset()
 
     def supports_streaming(self) -> bool:
         return True
@@ -468,9 +543,6 @@ class AntigravityExecutor(Executor):
         )
         session_key = self._session_key(messages)
         prompt = _latest_user_text(messages)
-        # Names of the tools bridged through the dispatch path this turn; the
-        # pre-tool decide hook reads this to skip already-gated bridged tools.
-        self._bridged_tool_names = self._bridged_tool_name_set(tools)
 
         # ── LLM_REQUEST policy evaluation ────────────────────────
         # Mirror the peer executors: when the adapter wired a policy evaluator,
@@ -558,8 +630,23 @@ class AntigravityExecutor(Executor):
 
         # ── LLM_RESPONSE policy evaluation ───────────────────────
         # Mirror the peer executors: evaluate after the stream completes but
-        # before TurnComplete so a DENY blocks the response from being
-        # persisted / shown.
+        # before TurnComplete so a DENY blocks the turn from completing and the
+        # response from being persisted as a finished assistant message.
+        #
+        # Known cross-executor limitation (NOT antigravity-specific): text
+        # deltas (TextChunk) have already been yielded live during streaming
+        # above, so an LLM_RESPONSE DENY can suppress TurnComplete but cannot
+        # un-send deltas a client already received. This is the SAME shape as
+        # the peer SDK executors — ClaudeSDKExecutor.run_turn yields TextChunk
+        # per ``content_block_delta`` / per ``TextBlock`` and only evaluates
+        # PHASE_LLM_RESPONSE after the stream ends (see its "LLM_RESPONSE policy
+        # evaluation" block), and OpenAIAgentsSDKExecutor yields TextChunk per
+        # ``response.output_text.delta`` and does not gate the response phase at
+        # all. Buffering deltas until the verdict would be a true output-block
+        # gate, but it must be decided once across all streaming executors (it
+        # trades away live streaming UX), so it is deliberately NOT diverged
+        # here. The post-stream DENY still prevents the blocked turn from being
+        # recorded / acted on, matching claude-sdk.
         if policy_eval is not None:
             resp_data: _StrAnyDict = {
                 "model": model,
@@ -842,10 +929,16 @@ class AntigravityExecutor(Executor):
         sdk_tools = self._build_sdk_tools(tools)
         if sdk_tools:
             config_kwargs["tools"] = sdk_tools
+        # Bind this agent's bridged-tool skip set into the hook below rather
+        # than reading mutable executor state at fire time: the agent (and so
+        # this hook) is rebuilt whenever the tool set changes, so the closure
+        # always holds the right names and a concurrent turn on another session
+        # can't corrupt them.
+        bridged_tool_names = self._bridged_tool_name_set(tools)
         # The pre-tool decide hook runs first so a policy DENY blocks execution
         # before the post-tool hook (which only observes completed calls).
         config_kwargs["hooks"] = [
-            self._build_pre_tool_hook(antigravity),
+            self._build_pre_tool_hook(antigravity, bridged_tool_names),
             self._build_post_tool_hook(antigravity, state),
         ]
         config = self._build_local_agent_config(antigravity, model=model, kwargs=config_kwargs)
@@ -915,7 +1008,9 @@ class AntigravityExecutor(Executor):
         logger.warning("TOOL_CALL policy failed closed tool=%s reason=%s", tool_name, fail_reason)
         return False, fail_reason
 
-    def _build_pre_tool_hook(self, antigravity: ModuleType) -> SDKHook:
+    def _build_pre_tool_hook(
+        self, antigravity: ModuleType, bridged_tool_names: frozenset[str]
+    ) -> SDKHook:
         """Build a ``PreToolCallDecideHook`` that enforces TOOL_CALL policy.
 
         The SDK invokes this BEFORE every tool runs with the pending
@@ -934,19 +1029,34 @@ class AntigravityExecutor(Executor):
         ``omnigent/runner/app.py`` "All tool calls go through AP:/mcp ... which
         enforces TOOL_CALL + TOOL_RESULT policies server-side"). Re-evaluating
         them here would double-count the same call (and could double-charge a
-        cost-budget checkpoint), so the hook SKIPS bridged tool names and only
-        gates the tools the dispatch path never sees — chiefly the SDK's
-        bundled native tools. This mirrors claude-sdk skipping its
-        ``mcp__omnigent__*`` prefix for the same reason.
+        cost-budget checkpoint), so the hook SKIPS bridged tools and only gates
+        the tools the dispatch path never sees — chiefly the SDK's bundled
+        native tools. This mirrors claude-sdk skipping its ``mcp__omnigent__*``
+        prefix for the same reason.
+
+        Scoping (the fix for the per-turn-state bypass): *bridged_tool_names* is
+        bound into this hook's closure — NOT read from mutable executor state —
+        and a fresh hook is built each time the agent is rebuilt (the tool set
+        is part of the agent signature), so a concurrent or subsequent turn on
+        another session can't swap the skip set out from under an in-flight
+        call. The skip is also made precise so a name collision can't open a
+        hole: a call to a bundled NATIVE tool is always gated even when its wire
+        name equals a bridged tool's name. Native is detected at the call site
+        (``ToolCall.name`` is a ``BuiltinTools`` enum member, or its wire name is
+        a known native name — see :func:`_is_native_tool_call`), so only a
+        genuinely bridged call is skipped.
 
         Defined inline because its base class only exists once the SDK is
         imported. Closes over the executor (``self``) so the gate reads the
         live :attr:`_policy_evaluator` / :attr:`_elicitation_handler`.
 
         :param antigravity: The imported ``google.antigravity`` module.
+        :param bridged_tool_names: Wire names of the tools bridged through the
+            dispatch path for this agent — the only names eligible to skip.
         :returns: A ``PreToolCallDecideHook`` for ``LocalAgentConfig.hooks``.
         """
         executor = self
+        native_wire_names = _native_tool_wire_names(antigravity)
 
         class _OmnigentToolPolicyHook(antigravity.hooks.PreToolCallDecideHook):  # type: ignore[misc, name-defined]
             """Gates each SDK ``ToolCall`` against Omnigent's TOOL_CALL policy."""
@@ -959,9 +1069,15 @@ class AntigravityExecutor(Executor):
                 :returns: A ``HookResult`` — ``allow=False`` blocks the call.
                 """
                 name = _tool_name(getattr(data, "name", None))
-                # Bridged Omnigent tools are TOOL_CALL-gated server-side on the
-                # dispatch path — don't evaluate them twice here.
-                if not name or name in executor._bridged_tool_names:
+                if not name:
+                    return antigravity.types.HookResult(allow=True)
+                # Skip ONLY a genuinely bridged call (already TOOL_CALL-gated
+                # server-side on the dispatch path). A native tool is gated here
+                # even if its wire name collides with a bridged name, so a
+                # bridged-name collision can't smuggle a native call past policy.
+                if name in bridged_tool_names and not _is_native_tool_call(
+                    data, native_wire_names
+                ):
                     return antigravity.types.HookResult(allow=True)
                 raw_args = getattr(data, "args", None)
                 args: ToolArgs = raw_args if isinstance(raw_args, dict) else {}
@@ -1029,13 +1145,15 @@ class AntigravityExecutor(Executor):
     def _bridged_tool_name_set(self, tools: list[ToolSpec]) -> frozenset[str]:
         """Return the names of the tools bridged through :attr:`_tool_executor`.
 
-        These are the Omnigent tools exposed as SDK callables for the turn —
-        exactly the names :meth:`_build_sdk_tools` would register. The pre-tool
-        decide hook uses this to skip them (they are TOOL_CALL-gated server-side
-        on the dispatch path). Returns an empty set when no executor bridge is
-        wired (the agent then runs native tools only, which the hook DOES gate).
+        These are the Omnigent tools exposed as SDK callables for the agent —
+        exactly the names :meth:`_build_sdk_tools` would register. The result is
+        bound into the pre-tool decide hook's closure (see
+        :meth:`_build_pre_tool_hook`), which skips these names for genuinely
+        bridged calls (they are TOOL_CALL-gated server-side on the dispatch
+        path). Returns an empty set when no executor bridge is wired (the agent
+        then runs native tools only, which the hook DOES gate).
 
-        :param tools: Omnigent tool specs for the turn.
+        :param tools: Omnigent tool specs for the agent being built.
         :returns: The bridged tool names, or an empty set.
         """
         if not tools or self._tool_executor is None:

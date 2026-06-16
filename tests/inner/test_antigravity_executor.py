@@ -76,6 +76,20 @@ class _StepTarget(enum.Enum):
     ENVIRONMENT = "ENVIRONMENT"
 
 
+class _BuiltinTools(enum.Enum):
+    """Subset of ``google.antigravity.types.BuiltinTools`` (native tool names).
+
+    Members carry the SDK's wire name as their ``.value`` — the same shape the
+    executor's native-vs-bridged discriminator reads. A ``ToolCall`` whose
+    ``name`` is one of these members is a bundled native tool; bridged callables
+    present a plain ``str`` name instead.
+    """
+
+    RUN_COMMAND = "run_command"
+    VIEW_FILE = "view_file"
+    EDIT_FILE = "edit_file"
+
+
 class _AntigravityCancelledError(Exception):
     """Stand-in for ``google.antigravity.types.AntigravityCancelledError``."""
 
@@ -378,6 +392,7 @@ def _install_fake_sdk(
         AntigravityCancelledError = _AntigravityCancelledError
         HookResult = _FakeHookResult
         ToolCall = _FakeSDKToolCall
+        BuiltinTools = _BuiltinTools
 
     class _FakeModule:
         LocalAgentConfig = _FakeLocalAgentConfig
@@ -1033,6 +1048,7 @@ def _install_blocking_sdk(
         AntigravityCancelledError = _AntigravityCancelledError
         HookResult = _FakeHookResult
         ToolCall = _FakeSDKToolCall
+        BuiltinTools = _BuiltinTools
 
     class _FakeModule:
         LocalAgentConfig = _FakeLocalAgentConfig
@@ -1345,3 +1361,286 @@ async def test_llm_response_policy_deny_blocks_response(monkeypatch: pytest.Monk
     assert phases == ["PHASE_LLM_REQUEST", "PHASE_LLM_RESPONSE"]
     resp_data = next(d for (p, d) in evaluator.calls if p == "PHASE_LLM_RESPONSE")
     assert resp_data["text_preview"] == "the secret is hunter2"
+
+
+@pytest.mark.asyncio
+async def test_llm_response_deny_matches_peer_stream_then_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM_RESPONSE is a stream-then-verdict turn-completion gate, matching the peers.
+
+    Documents (and pins) the deliberate cross-executor behaviour for FINDING 2:
+    Antigravity does NOT buffer deltas until the LLM_RESPONSE verdict — it
+    streams ``TextChunk``\\ s live and evaluates PHASE_LLM_RESPONSE only after the
+    stream ends, exactly like ``ClaudeSDKExecutor`` (which yields ``TextChunk``
+    per content-block delta and gates the response phase afterwards) and
+    ``OpenAIAgentsSDKExecutor`` (which streams ``TextChunk`` and does not gate the
+    response phase at all). So a DENY blocks TurnComplete / persistence but the
+    delta the client already saw cannot be un-sent. Buffering would diverge from
+    both peers unilaterally, so it is intentionally not done here.
+
+    This test asserts the precise observable contract: the delta IS emitted
+    (proving no buffering), it is emitted BEFORE the response verdict runs, and
+    the verdict still blocks completion.
+    """
+    deny = _FakePolicyVerdict("POLICY_ACTION_DENY", reason="blocked output")
+    evaluator = _FakePolicyEvaluator({"PHASE_LLM_RESPONSE": deny})
+    _install_fake_sdk(monkeypatch, scripts=[[_text_step("streamed-delta")]])
+    executor = AntigravityExecutor()
+    executor._policy_evaluator = evaluator
+
+    events = await _drain(executor, [{"role": "user", "content": "go", "session_id": "s1"}])
+
+    # The delta WAS streamed live (not buffered/withheld pending the verdict).
+    texts = [e.text for e in events if isinstance(e, TextChunk)]
+    assert texts == ["streamed-delta"]
+    # The response verdict ran AFTER the stream produced its text (the recorded
+    # text_preview proves the evaluator saw the already-streamed content).
+    resp_data = next(d for (p, d) in evaluator.calls if p == "PHASE_LLM_RESPONSE")
+    assert resp_data["text_preview"] == "streamed-delta"
+    # The DENY still blocks turn completion: ExecutorError replaces TurnComplete.
+    assert any(isinstance(e, ExecutorError) for e in events)
+    assert not any(isinstance(e, TurnComplete) for e in events)
+
+
+# ── FINDING 1 regression tests: collision-safe + per-agent skip set ──────
+
+
+@pytest.mark.asyncio
+async def test_native_tool_with_bridged_name_collision_still_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native tool is policy-gated even when its name collides with a bridged tool.
+
+    Regression for the bypass: the old hook skipped any call whose bare name was
+    in the bridged set, so a bundled NATIVE tool (e.g. ``view_file``) sharing a
+    name with a bridged Omnigent tool would skip TOOL_CALL policy entirely. The
+    fix gates a native call regardless of the name collision; it must recognise
+    native via BOTH the wire-name set (string-named call) and the
+    ``BuiltinTools`` enum (enum-named call).
+    """
+    deny = _FakePolicyVerdict("POLICY_ACTION_DENY", reason="view_file blocked by operator")
+    evaluator = _FakePolicyEvaluator({"PHASE_TOOL_CALL": deny})
+    # Two native ``view_file`` calls that collide with the bridged name — one
+    # presented as a plain string name, one as a ``BuiltinTools`` enum member —
+    # plus a genuinely bridged ``sys_shell`` call that must still be skipped.
+    script: list[_TurnAction] = [
+        _ExecToolCall(
+            call=_FakeSDKToolCall("view_file", {"path": "/etc/passwd"}, call_id="n1"),
+            result=_FakeToolResult("view_file", result={"ok": True}, call_id="n1"),
+        ),
+        _ExecToolCall(
+            call=_FakeSDKToolCall(_BuiltinTools.VIEW_FILE, {"path": "/secrets"}, call_id="n2"),
+            result=_FakeToolResult("view_file", result={"ok": True}, call_id="n2"),
+        ),
+        _exec_tool("sys_shell", {"cmd": "ls"}, call_id="b1"),
+        _text_step("done"),
+    ]
+    captured = _install_fake_sdk(monkeypatch, scripts=[script])
+    executor = AntigravityExecutor()
+    executor._policy_evaluator = evaluator
+    executor._tool_executor = lambda name, args: _async_ok()
+    # Expose BOTH names as bridged — ``view_file`` deliberately collides with the
+    # native tool, ``sys_shell`` does not.
+    tool_specs = [
+        {"name": "view_file", "description": "bridged view", "parameters": {}},
+        {"name": "sys_shell", "description": "shell", "parameters": {}},
+    ]
+
+    await _drain(executor, [{"role": "user", "content": "go", "session_id": "s1"}], tool_specs)
+
+    conversation = captured["agents"][0].conversation
+    # Both native ``view_file`` calls were gated and DENIED despite the bridged
+    # name collision; only the non-colliding bridged ``sys_shell`` ran. The
+    # second call's recorded name is the ``BuiltinTools`` enum member (the SDK's
+    # native-call shape), so resolve to wire names before comparing.
+    denied_wire = [getattr(n, "value", n) for n in conversation.denied_tools]
+    assert denied_wire == ["view_file", "view_file"]
+    assert conversation.executed_tools == ["sys_shell"]
+    # Policy was consulted for each native call (and only those) — the bridged
+    # ``sys_shell`` was skipped, so it never reached the evaluator. The hook
+    # passes the resolved wire name to the evaluator for both call shapes.
+    tool_phase_names = [d["name"] for (p, d) in evaluator.calls if p == "PHASE_TOOL_CALL"]
+    assert tool_phase_names == ["view_file", "view_file"]
+
+
+class _GatingBlockingConversation:
+    """Conversation that blocks mid-turn, then runs a tool through the pre-gate.
+
+    Models a turn that is provably in flight when a *second*, concurrent turn
+    runs to completion: it streams one delta, blocks on ``gate`` (so the test
+    can interleave another session's full turn), and only after release drives
+    its scripted ``ToolCall`` through every registered ``PreToolCallDecideHook``
+    — exactly as the real ``_handle_tool_call`` flow does. Whether the call ran
+    or was denied is recorded so the test can prove which bridged skip set the
+    hook consulted at fire time.
+
+    :param hooks: The agent's registered hooks (the pre-tool decide hooks are
+        consulted; others are ignored).
+    :param gate: Opened by the test once the concurrent turn has finished, so
+        this turn's tool-gate fires strictly afterwards.
+    :param call: The ``ToolCall`` to push through the gate after release.
+    """
+
+    def __init__(self, hooks: list[Any], gate: asyncio.Event, call: _FakeSDKToolCall) -> None:
+        self._pre_hooks = [h for h in hooks if isinstance(h, _FakePreToolCallDecideHook)]
+        self._gate = gate
+        self._call = call
+        self.sends: list[str] = []
+        self.cancel_called = 0
+        self.executed_tools: list[str] = []
+        self.denied_tools: list[str] = []
+
+    async def send(self, prompt: Any, **_kw: Any) -> None:
+        self.sends.append(prompt)
+
+    async def receive_steps(self) -> Any:
+        yield _FakeStep(
+            step_type=_StepType.TEXT_RESPONSE, status=_StepStatus.ACTIVE, content_delta="a-stream"
+        )
+        await self._gate.wait()  # held open until the concurrent turn completes
+        allow = True
+        for hook in self._pre_hooks:
+            res = await hook.run(SimpleNamespace(), self._call)
+            if not res.allow:
+                allow = False
+                break
+        if allow:
+            self.executed_tools.append(self._call.name)
+        else:
+            self.denied_tools.append(self._call.name)
+
+    async def cancel(self) -> None:
+        self.cancel_called += 1
+
+
+@pytest.mark.asyncio
+async def test_bridged_skip_set_not_corrupted_by_concurrent_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent turn on another session can't corrupt an in-flight hook's skip set.
+
+    Regression for the per-turn-state bypass: the skip set used to live on the
+    executor instance (``self._bridged_tool_names``) and be overwritten at the
+    START of every ``run_turn``. So while session ``a``'s turn was mid-flight
+    (its tool-gate not yet fired), a concurrent session ``b`` turn would
+    overwrite that shared set with ``b``'s names — and ``a``'s hook would then
+    consult ``b``'s set, skipping or gating the wrong tools.
+
+    Deterministic interleave: ``a`` bridges ``shared_tool`` and blocks after one
+    delta, BEFORE its gate fires. While ``a`` is parked, ``b`` (which bridges a
+    DISJOINT set NOT containing ``shared_tool``) runs to completion. Then ``a``
+    is released and gates ``shared_tool``. Correct (closure-bound) behaviour:
+    ``a``'s hook still has ``{shared_tool}`` and SKIPS it, so it runs despite the
+    DENY verdict. The old shared-state code would have ``a``'s hook read ``b``'s
+    set, gate ``shared_tool``, and wrongly DENY it.
+    """
+    # DENY everything that reaches the evaluator — so "skipped" (ran) vs "gated"
+    # (denied) is an unambiguous signal of which set the hook used.
+    deny = _FakePolicyVerdict("POLICY_ACTION_DENY", reason="should not be consulted for a")
+    evaluator = _FakePolicyEvaluator({"PHASE_TOOL_CALL": deny})
+
+    gate = asyncio.Event()
+    a_call = _FakeSDKToolCall("shared_tool", {"x": 1}, call_id="a1")
+    captured: dict[str, Any] = {}
+
+    class _FakeHooks:
+        PostToolCallHook = _FakePostToolCallHook
+        PreToolCallDecideHook = _FakePreToolCallDecideHook
+
+    class _FakeTypes:
+        AntigravityCancelledError = _AntigravityCancelledError
+        HookResult = _FakeHookResult
+        ToolCall = _FakeSDKToolCall
+        BuiltinTools = _BuiltinTools
+
+    # Session ``b`` uses the ordinary scripted conversation; session ``a`` uses
+    # the blocking, gate-driven one. They are told apart by the bridged tool
+    # name baked into the agent config the executor builds.
+    b_queue: collections.deque[list[_TurnAction]] = collections.deque(
+        [[_exec_tool("beta", {"y": 2}, call_id="b1")]]
+    )
+
+    class _SwitchingModule:
+        LocalAgentConfig = _FakeLocalAgentConfig
+        hooks = _FakeHooks
+        types = _FakeTypes
+
+        @staticmethod
+        def Agent(config: Any) -> Any:
+            tool_names = {
+                getattr(t, "__name__", "") for t in (getattr(config, "tools", None) or [])
+            }
+            if "shared_tool" in tool_names:
+                conv = _GatingBlockingConversation(
+                    list(getattr(config, "hooks", []) or []), gate, a_call
+                )
+                captured["conv_a"] = conv
+            else:
+                conv = _FakeConversation(list(getattr(config, "hooks", []) or []), b_queue)
+                captured["conv_b"] = conv
+
+            class _Agent:
+                def __init__(self) -> None:
+                    self._conversation = conv
+
+                @property
+                def conversation(self) -> Any:
+                    return self._conversation
+
+                async def __aenter__(self) -> Any:
+                    return self
+
+                async def __aexit__(self, *_a: object) -> None:
+                    return None
+
+            return _Agent()
+
+    monkeypatch.setattr(ag, "_ensure_antigravity_sdk", lambda: _SwitchingModule())
+
+    executor = AntigravityExecutor()
+    executor._policy_evaluator = evaluator
+    executor._tool_executor = lambda name, args: _async_ok()
+
+    tools_a = [{"name": "shared_tool", "description": "bridged for a", "parameters": {}}]
+    tools_b = [{"name": "beta", "description": "bridged for b", "parameters": {}}]
+
+    # Start ``a``; it streams one delta then parks on the gate (mid-flight).
+    a_collected: list[Any] = []
+    a_started = asyncio.Event()
+
+    async def _drive_a() -> None:
+        async for event in executor.run_turn(
+            [{"role": "user", "content": "a", "session_id": "a"}],
+            tools=tools_a,
+            system_prompt="sys",
+        ):
+            a_collected.append(event)
+            if isinstance(event, TextChunk):
+                a_started.set()
+
+    a_task = asyncio.create_task(_drive_a())
+    await asyncio.wait_for(a_started.wait(), timeout=5)
+
+    # With ``a`` provably parked before its gate, run ``b`` to completion. Under
+    # the old code this is the write that would clobber the shared skip set.
+    await _drain(executor, [{"role": "user", "content": "b", "session_id": "b"}], tools_b)
+
+    # Release ``a``; its tool-gate now fires and must use ``a``'s own set.
+    gate.set()
+    await asyncio.wait_for(a_task, timeout=5)
+
+    conv_a = captured["conv_a"]
+    conv_b = captured["conv_b"]
+    # ``a`` bridged ``shared_tool`` → its hook skipped it → it ran, despite the
+    # DENY. A regression to shared state would deny it (a's hook seeing b's set).
+    assert conv_a.executed_tools == ["shared_tool"]
+    assert conv_a.denied_tools == []
+    # ``b`` bridged ``beta`` → skipped → ran. Sanity that the interleaved turn
+    # behaved normally.
+    assert conv_b.executed_tools == ["beta"]
+    assert conv_b.denied_tools == []
+    # The evaluator was never consulted for ``shared_tool`` or ``beta`` — both
+    # were correctly skipped as bridged for their own session.
+    gated_names = {d["name"] for (p, d) in evaluator.calls if p == "PHASE_TOOL_CALL"}
+    assert gated_names == set()
