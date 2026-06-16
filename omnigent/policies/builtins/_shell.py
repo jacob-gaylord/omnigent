@@ -23,6 +23,21 @@ import re
 # wrappers that take the real command as their trailing arguments.
 CMD_WRAPPERS: frozenset[str] = frozenset({"sudo", "env", "command", "time", "nohup", "exec"})
 
+# Wrappers that take their own leading positional argument (a duration) — and
+# optionally their own flags — *before* the real command: ``timeout 60 git …``,
+# ``timeout --signal=KILL 5m git …``. Skipping only the wrapper word (as for
+# ``CMD_WRAPPERS``) would leave the duration as the apparent command, so these
+# need the extra positional consumed too.
+CMD_WRAPPERS_WITH_DURATION: frozenset[str] = frozenset({"timeout"})
+
+# ``timeout`` flags that consume a following value when written as two tokens
+# (``-s KILL`` / ``--kill-after 10``). Used to avoid mistaking the flag's value
+# for the duration positional. Combined ``--flag=value`` forms are a single
+# token and need no special handling.
+_DURATION_WRAPPER_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"-s", "--signal", "-k", "--kill-after"}
+)
+
 # Shell interpreters that run a command string passed via ``-c`` (or, for
 # ``eval``, as positional words). Their inner command is parsed recursively so
 # ``bash -c "git push …"`` is gated like a bare ``git push …`` rather than
@@ -33,24 +48,82 @@ SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "ks
 MAX_SHELL_NESTING = 4
 
 
+def _extract_command_substitutions(command: str) -> tuple[str, list[str]]:
+    """
+    Pull ``$(...)`` and backtick command-substitution bodies out of a command.
+
+    A substitution body is itself a command the shell *runs* (its output is
+    interpolated), so ``x=$(git push …)`` executes the push even though the
+    outer token looks like a plain env-assignment. To gate it, the body must be
+    parsed as a command in its own right rather than swallowed by the assignment.
+
+    :param command: The raw shell command string.
+    :returns: ``(outer, bodies)`` — *outer* is *command* with each substitution
+        replaced by a space (so the residue, e.g. ``x=``, parses harmlessly),
+        and *bodies* is the list of inner command strings to parse separately.
+        ``$(...)`` is matched with balanced-paren scanning so nested
+        substitutions are captured; backticks are treated as non-nesting.
+    """
+    bodies: list[str] = []
+    out: list[str] = []
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "$" and i + 1 < n and command[i + 1] == "(":
+            depth, j = 1, i + 2
+            while j < n and depth > 0:
+                if command[j] == "(":
+                    depth += 1
+                elif command[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            bodies.append(command[i + 2 : j])
+            out.append(" ")
+            i = j + 1
+            continue
+        if ch == "`":
+            j = command.find("`", i + 1)
+            if j == -1:
+                out.append(ch)
+                i += 1
+                continue
+            bodies.append(command[i + 1 : j])
+            out.append(" ")
+            i = j + 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out), bodies
+
+
 def split_command_segments(command: str) -> list[str]:
     """
     Split a shell command on chaining operators into individual segments.
 
-    Splits on ``&&``, ``||``, ``;``, ``|`` and newlines so that
-    ``git add . && git push`` is evaluated as two segments. This is a naive
-    split that does not honor operators appearing inside quotes — acceptable
-    because the commands these policies gate do not embed these operators in
-    quoted args in practice, and a mis-split only ever produces an extra
-    ignored segment.
+    Splits on ``&&``, ``||``, ``;``, ``|``, a single ``&`` (background
+    operator — ``a & b`` runs both) and newlines so that
+    ``git add . && git push`` is evaluated as two segments. Command
+    substitutions (``$(...)`` / backticks) are pulled out first and their
+    bodies appended as their own segments, so a command hidden inside one is
+    still gated. This is a naive split that does not honor operators appearing
+    inside quotes — acceptable because the commands these policies gate do not
+    embed these operators in quoted args in practice, and a mis-split only ever
+    produces an extra segment (an unbalanced one surfaces as ASK, not a silent
+    allow).
 
     :param command: The raw shell command string, e.g.
         ``"cd /repo && npm test"``.
     :returns: List of trimmed, non-empty segments, e.g.
         ``["cd /repo", "npm test"]``.
     """
-    parts = re.split(r"&&|\|\||[;|\n]", command)
-    return [seg.strip() for seg in parts if seg.strip()]
+    outer, bodies = _extract_command_substitutions(command)
+    parts = re.split(r"&&|\|\||[;|\n&]", outer)
+    segments = [seg.strip() for seg in parts if seg.strip()]
+    for body in bodies:
+        segments.extend(split_command_segments(body))
+    return segments
 
 
 def real_invocation_tokens(tokens: list[str]) -> list[str]:
@@ -68,8 +141,35 @@ def real_invocation_tokens(tokens: list[str]) -> list[str]:
         if token in CMD_WRAPPERS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
             index += 1
             continue
+        if token in CMD_WRAPPERS_WITH_DURATION:
+            index = _skip_duration_wrapper_args(tokens, index + 1)
+            continue
         break
     return tokens[index:]
+
+
+def _skip_duration_wrapper_args(tokens: list[str], index: int) -> int:
+    """
+    Skip a duration-wrapper's own flags and its leading duration positional.
+
+    Given the index just past a ``CMD_WRAPPERS_WITH_DURATION`` word (e.g.
+    ``timeout``), advance past any option flags it carries (consuming the value
+    of a separate-token value flag such as ``-s KILL``) and then the single
+    required duration positional, leaving *index* at the real command.
+
+    :param tokens: The full token list of the segment.
+    :param index: Index of the first token after the wrapper word.
+    :returns: Index of the wrapped command's first token.
+    """
+    while index < len(tokens) and tokens[index].startswith("-"):
+        flag = tokens[index]
+        index += 1
+        if flag in _DURATION_WRAPPER_VALUE_FLAGS and index < len(tokens):
+            index += 1
+    # The duration positional itself (``60`` / ``1.5s`` / ``5m``).
+    if index < len(tokens):
+        index += 1
+    return index
 
 
 def unwrap_shell_command(tokens: list[str]) -> str | None:
@@ -85,7 +185,12 @@ def unwrap_shell_command(tokens: list[str]) -> str | None:
     head = tokens[0].rsplit("/", 1)[-1]
     if head in SHELL_INTERPRETERS:
         for i, tok in enumerate(tokens):
-            if tok == "-c" and i + 1 < len(tokens):
+            # ``-c`` takes the command string as its next argument. Match the
+            # bare flag *and* combined short-flag bundles that include ``c``
+            # (``-lc``, ``-ic``, ``-xc``): bash still reads the command from the
+            # next operand, so ``bash -lc "git push …"`` must unwrap like
+            # ``bash -c "git push …"`` rather than slip past as unrecognized.
+            if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", tok) and i + 1 < len(tokens):
                 return tokens[i + 1]
         return None
     if head == "eval":
