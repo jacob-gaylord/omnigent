@@ -24,8 +24,14 @@ env:
   PIP_INDEX_URL: https://pypi.org/simple
 
 jobs:
+  # Security precondition gate (security-gate.yml): untrusted PRs wait for the
+  # scan; trusted authors / non-PR events pass through.
+  gate:
+    uses: ./.github/workflows/security-gate.yml
+
   review:
     name: Polly AI Review
+    needs: gate
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -166,12 +172,27 @@ jobs:
           ${diff}
           \`\`\`
 
+          ## Component domains
+          Classify every changed file into one of these domains and organise
+          your feedback accordingly:
+
+          | Label | Scope | Domain experts |
+          |-------|-------|----------------|
+          | comp:core | server routes, runner, store, forwarders, orchestration | core runtime team |
+          | comp:web-ui | ap-web frontend (React/TS), styles, assets | web/frontend team |
+          | comp:sandbox | sandbox policies, bubblewrap, isolation | core runtime team (sandbox specialists) |
+          | comp:sdk | SDK clients, harness adapters, inner executors | SDK team |
+          | comp:cli | CLI entrypoints, argument parsing | CLI owners |
+          | comp:ci | GitHub Actions workflows, CI scripts | infra team |
+          | comp:docs | docs, README, API.md, changelogs | rotates across all teams |
+
           ## Instructions
-          Review the diff against the PR description. Report:
+          Review the diff against the PR description. For each domain that has
+          changes, report:
           1. **Blocking issues** — bugs, security problems, correctness errors, data loss risks.
           2. **Non-blocking suggestions** — style, naming, performance, test coverage gaps.
-          3. **Summary** — one-paragraph overall assessment.
 
+          End with a short **Summary** — one-paragraph overall assessment.
           Be concise. Do not restate the diff. Focus on what matters.
           PROMPT_EOF
 
