@@ -4306,9 +4306,13 @@ def resume(
 # choose model/harness without editing the agent file. See
 # ``omnigent.chat.run_chat`` for how local-agent options get baked
 # into a materialized copy of the spec before the server starts.
+# Order mirrors the ``omnigent setup`` harness flow so the two surfaces read
+# the same: the provider families (Claude, then Codex/OpenAI, then Pi — see
+# ``_run_configure_harnesses_interactive``'s ``families`` list), then Cursor,
+# then Antigravity.
 _HARNESS_CHOICES_HELP = (
-    "'antigravity', 'claude' (alias for 'claude-sdk'), 'claude-sdk', "
-    "'codex', 'cursor', 'openai-agents', 'open-responses', or 'pi'"
+    "'claude' (alias for 'claude-sdk'), 'claude-sdk', 'codex', "
+    "'openai-agents', 'open-responses', 'pi', 'cursor', or 'antigravity'"
 )
 _HARNESS_HELP = f"Harness to use for a local agent: {_HARNESS_CHOICES_HELP}."
 _RUN_HARNESS_HELP = (
@@ -4329,11 +4333,11 @@ _FORK_HELP = "Fork an existing session by id and open the REPL on the fork."
 _LOG_HELP = "Write a JSON dump of the conversation to ~/.omnigent/logs/ on exit."
 
 
+# Keyed in the ``omnigent setup`` harness order (Claude, Codex, then the
+# Cursor / Antigravity rows — see ``_HARNESS_CHOICES_HELP`` above and
+# ``_run_configure_harnesses_interactive``); pi has no branded prompt and
+# falls back to ``_DEFAULT_HARNESS_PROMPT``.
 _DEFAULT_HARNESS_PROMPTS = {
-    "antigravity": (
-        "You are Antigravity, running through Omnigent. "
-        "Help the user with software engineering tasks."
-    ),
     "claude-sdk": (
         "You are Claude Code, running through Omnigent. "
         "Help the user with software engineering tasks."
@@ -4343,6 +4347,10 @@ _DEFAULT_HARNESS_PROMPTS = {
     ),
     "cursor": (
         "You are Cursor, running through Omnigent. Help the user with software engineering tasks."
+    ),
+    "antigravity": (
+        "You are Antigravity, running through Omnigent. "
+        "Help the user with software engineering tasks."
     ),
 }
 _DEFAULT_HARNESS_PROMPT = "You are a helpful coding agent running through Omnigent."

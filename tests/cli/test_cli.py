@@ -2010,6 +2010,21 @@ def test_harness_choices_help_lists_cursor_and_antigravity() -> None:
         assert f"'{harness}'" in _HARNESS_CHOICES_HELP, _HARNESS_CHOICES_HELP
 
 
+def test_harness_choices_help_orders_by_setup_flow() -> None:
+    """The ``--harness`` help lists choices in the ``omnigent setup`` order.
+
+    Source of truth for the order is ``_run_configure_harnesses_interactive``:
+    it builds the menu as ``families = [ANTHROPIC_FAMILY, OPENAI_FAMILY,
+    PI_SURFACE]`` (Claude, Codex, Pi) followed by the Cursor then Antigravity
+    rows. The help string mirrors that family-then-SDK sequence so the two
+    surfaces read the same. Assert the representative ids appear in that order
+    (without pinning exact punctuation/spacing, which would be brittle).
+    """
+    order = ["claude-sdk", "codex", "pi", "cursor", "antigravity"]
+    positions = [_HARNESS_CHOICES_HELP.index(f"'{harness}'") for harness in order]
+    assert positions == sorted(positions), (order, positions, _HARNESS_CHOICES_HELP)
+
+
 @pytest.mark.parametrize(
     ("harness", "brand"),
     [
