@@ -24,15 +24,14 @@ Issue templates provide structure without being a barrier. Only the description 
 
 If the reporter skips optional fields, the bot can still triage from the description alone. If it can't, it labels `needs-info` and the reporter fills in details later.
 
-Three templates, all minimal:
+Two templates:
 
 | Template | Auto-labels | Required | Optional hints |
 |---|---|---|---|
 | Bug Report | `bug`, `needs-triage` | Description only | Component, repro steps, version, OS |
 | Feature Request | `enhancement`, `needs-triage` | Problem/use case only | Proposed solution, alternatives |
-| Question | `question`, `needs-triage` | Question only | What you've tried |
 
-Blank issues enabled - not everyone fits a template, and forcing people into one just creates bad data.
+Questions redirect to GitHub Discussions (via `config.yml` contact link) - they aren't actionable work and would clog the issue tracker. Blank issues enabled for anything that doesn't fit a template.
 
 
 ### Stage 2 - AI Triage
@@ -62,7 +61,6 @@ Triggered on every new issue. The bot classifies, deduplicates, resolves what it
 | **Duplicate** | 3-day grace period → auto-close (unless reporter reacts 👎) | No |
 | **`needs-info`**, reporter responds | Bot removes `needs-info`, re-adds `needs-triage`, bot re-triages | No |
 | **`needs-info`**, no response 14d | Marked `stale` → closed after 7 more days | No |
-| **`question`** | Bot can answer from docs/code context; if not, stays open for community | No |
 | **`good-first-issue`** | Contributor claims via comment, starts working | No (until PR review) |
 | **Stale** (30d no activity) | Marked `stale` → closed after 14 more days | No |
 | **`P0-critical` or `P1-high`** | Stays open, exempt from stale bot | **Yes - escalated** |
@@ -138,7 +136,7 @@ Duplicates get a 3-day grace period. Reporter can react 👎 to prevent closure.
 
 | Category | Labels | Purpose |
 |---|---|---|
-| **Type** | `bug`, `enhancement`, `question`, `documentation` | What kind of issue |
+| **Type** | `bug`, `enhancement`, `documentation` | What kind of issue |
 | **Triage** | `needs-triage`, `triaged`, `needs-info`, `duplicate`, `wontfix` | Triage state |
 | **Priority** | `P0-critical`, `P1-high`, `P2-medium`, `P3-low` | Severity |
 | **Component** | `comp:server`, `comp:runner`, `comp:repr`, `comp:web-ui`, `comp:policies`, `comp:harnesses`, ... | Which subsystem (mirrors CODEOWNERS) |
