@@ -194,8 +194,10 @@ jobs:
           mkdir -p "$HOME/.omnigent"
           # Use python to write the config safely — avoids interpolating
           # secrets/URLs into a heredoc where special chars could break YAML.
+          # Uses json (stdlib) instead of yaml to avoid needing PyYAML on
+          # the system python; the output is valid YAML (JSON is a subset).
           python3 -c "
-          import pathlib, os, yaml
+          import pathlib, os, json
           gw = os.environ['GATEWAY_BASE_URL']
           host = gw.removesuffix('/serving-endpoints')
           cfg = {
@@ -218,7 +220,7 @@ jobs:
               }
           }
           pathlib.Path.home().joinpath('.omnigent', 'config.yaml').write_text(
-              yaml.safe_dump(cfg, default_flow_style=False)
+              json.dumps(cfg, indent=2)
           )
           "
 
