@@ -203,12 +203,29 @@ function startInboxPoller(pi, config, handleInterrupt) {
             deliverAttempts.set(key, attempts);
             continue;
           }
-          // Cap reached: surface a failure (a silent drop would be invisible)
-          // and consume the file to stop the spin.
+          // Cap reached: the queued follow-up could not be delivered. Surface
+          // it as a NON-terminal informational note and consume the file to
+          // stop the spin. A `failed` external_session_status would be wrong
+          // here: the runner treats that as an authoritative terminal turn /
+          // sub-agent failure (it fans session.status=failed to the parent and
+          // wakes it with a fabricated error), killing a live session over a
+          // transient delivery hiccup. An `error` conversation item is the
+          // non-terminal channel — it renders an operator-visible banner but
+          // never flows into terminal-status handling, so the session keeps
+          // running.
           deliverAttempts.delete(key);
           postEvent(config, {
-            type: "external_session_status",
-            data: { status: "failed", response_id: `pi-deliver-failed-${Date.now()}` },
+            type: "external_conversation_item",
+            data: {
+              response_id: `pi-deliver-dropped-${Date.now()}`,
+              item_type: "error",
+              item_data: {
+                source: "execution",
+                code: "pi_followup_delivery_dropped",
+                message:
+                  "Omnigent: a queued follow-up message could not be delivered to Pi and was dropped.",
+              },
+            },
           });
           try {
             fs.unlinkSync(fullPath);
