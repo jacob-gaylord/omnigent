@@ -573,7 +573,7 @@ def live_server(
             yaml.safe_dump(
                 {
                     "llm": {
-                        "model": "mock-model",
+                        "model": "_policy_llm_",
                         "connection": {
                             "base_url": f"{mock_llm_server_url}/v1",
                             "api_key": "mock-key",
@@ -664,13 +664,13 @@ def live_server(
         )
 
     # Set a non-resettable ALLOW fallback on the server's policy-classifier
-    # LLM queue ("mock-model") so the classifier always returns ALLOW even
+    # LLM queue ("_policy_llm_") so the classifier always returns ALLOW even
     # when a parallel xdist worker's reset_mock_llm clears the regular queue
     # between configure and the actual classifier call.
     if using_mock_llm and mock_llm_server_url is not None:
         set_fallback_mock_llm(
             mock_llm_server_url,
-            "mock-model",
+            "_policy_llm_",
             '{"action": "allow", "reason": ""}',
         )
 

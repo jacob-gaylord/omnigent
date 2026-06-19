@@ -554,7 +554,7 @@ _DENY_CANADA_POLICY_CONFIG = {
 # Server-level LLM model key — the PolicyLLMClient uses the
 # model from the server's ``llm:`` config, which in mock mode
 # is always ``"mock-model"``.
-_SERVER_LLM_MODEL = "mock-model"
+_SERVER_LLM_MODEL = "_policy_llm_"
 
 
 def test_prompt_policy_allow_path_reaches_llm(
