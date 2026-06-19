@@ -150,7 +150,8 @@ def test_terminal_multi_command_workflow(
                         "call_id": "call_send1",
                         "name": "sys_terminal_send",
                         "arguments": (
-                            '{"terminal": "bash", "session": "s1", "text": "echo hello_world\n"}'
+                            '{"terminal": "bash", "session": "s1",'
+                            ' "text": "echo hello_world", "keys": "Enter"}'
                         ),
                     }
                 ],
@@ -220,7 +221,8 @@ def test_terminal_multi_command_workflow(
                         "call_id": "call_send2",
                         "name": "sys_terminal_send",
                         "arguments": (
-                            '{"terminal": "bash", "session": "s1", "text": "echo goodbye_world\n"}'
+                            '{"terminal": "bash", "session": "s1",'
+                            ' "text": "echo goodbye_world", "keys": "Enter"}'
                         ),
                     }
                 ],
@@ -363,8 +365,9 @@ def test_terminal_persists_across_turns(
                         "call_id": "call_send_p1",
                         "name": "sys_terminal_send",
                         "arguments": (
-                            f'{{"terminal": "bash", "session": "s1", "text": '
-                            f'"echo \\"test content\\" > {test_file}\\n"}}'
+                            f'{{"terminal": "bash", "session": "s1",'
+                            f' "text": "echo \\"test content\\" > {test_file}",'
+                            f' "keys": "Enter"}}'
                         ),
                     }
                 ],
@@ -415,7 +418,7 @@ def test_terminal_persists_across_turns(
                         "name": "sys_terminal_send",
                         "arguments": (
                             f'{{"terminal": "bash", "session": "s1",'
-                            f' "text": "cat {test_file}\\n"}}'
+                            f' "text": "cat {test_file}", "keys": "Enter"}}'
                         ),
                     }
                 ],
