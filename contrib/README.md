@@ -8,8 +8,8 @@ subscriptions only** (no API keys, no Databricks, no Pi).
 ### `PM` — Matt Pocock-method coding orchestrator
 A polly-style orchestrator that runs the [Matt Pocock](https://aihero.dev)
 engineering method: **align first** (grill → vertical-slice tickets, human
-approves) → **Codex implements** → **Claude Code gives an independent
-second-opinion review** → PR; the human merges. It also rotates to a fresh
+approves) → **domain-routed build** (frontend → Claude Code, backend → Codex,
+each reviewed by the *other* vendor) → PR; the human merges. It also rotates to a fresh
 thread (via `/handoff`) instead of letting context decay into the dumb zone.
 Policies enforce human-controlled promotion (`blast_radius gate_pushes: true`)
 and confine workers to their own worktree (`worktree_guard`).
