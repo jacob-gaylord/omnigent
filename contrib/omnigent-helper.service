@@ -1,0 +1,13 @@
+[Unit]
+Description=omnigent helper — auto-title threads + fresh-thread (dumb-zone) nudges
+After=default.target
+
+[Service]
+Type=simple
+# login shell so the user's full PATH (node, claude CLI) is present; %h = your home dir
+ExecStart=/bin/bash -lc 'exec %h/.local/share/uv/tools/omnigent/bin/python %h/.omnigent/tools/omnigent-helper.py'
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
