@@ -352,10 +352,8 @@ def _ensure_default_agents(
     """
     _ensure_default_claude_agent(agent_store, artifact_store, agent_cache)
     _ensure_default_codex_agent(agent_store, artifact_store, agent_cache)
-    _ensure_default_pi_agent(agent_store, artifact_store, agent_cache)
-    _ensure_default_cursor_agent(agent_store, artifact_store, agent_cache)
-    _ensure_default_debby_agent(agent_store, artifact_store, agent_cache)
-    _ensure_default_polly_agent(agent_store, artifact_store, agent_cache)
+    # Fork: pi / cursor / debby / polly built-ins intentionally NOT seeded —
+    # this deployment surfaces only Claude Code, Codex, and custom agents.
     _ensure_extra_builtin_agents(agent_store, artifact_store, agent_cache)
 
 

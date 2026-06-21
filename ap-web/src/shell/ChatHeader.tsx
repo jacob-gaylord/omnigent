@@ -254,7 +254,7 @@ export function ChatHeader({
             Self-contained — reads the chat store directly, renders
             nothing when the user is alone. */}
         {conversationId && <PresenceAvatars />}
-        {conversationId && <UsageWidget />}
+        <UsageWidget />
         {/* Desktop (md+) action buttons. On mobile these collapse into
             the three-dot "Session actions" menu below, which renders
             the same set off the same gating booleans. Clone has no
