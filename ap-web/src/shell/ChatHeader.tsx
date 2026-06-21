@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { AgentInfoButton } from "@/components/AgentInfo";
 import { PresenceAvatars } from "@/components/PresenceAvatars";
+import { UsageWidget } from "@/components/UsageWidget";
 import type { Agent } from "@/hooks/useAgents";
 import { cn } from "@/lib/utils";
 import { TAB_BADGE_BASE } from "./railTabs";
@@ -253,6 +254,7 @@ export function ChatHeader({
             Self-contained — reads the chat store directly, renders
             nothing when the user is alone. */}
         {conversationId && <PresenceAvatars />}
+        {conversationId && <UsageWidget />}
         {/* Desktop (md+) action buttons. On mobile these collapse into
             the three-dot "Session actions" menu below, which renders
             the same set off the same gating booleans. Clone has no
