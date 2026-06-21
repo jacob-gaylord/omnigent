@@ -26,7 +26,7 @@ Prerequisites:
 
 Usage::
 
-    python -m pytest tests/e2e/test_repl_approval_e2e.py -v --timeout=180 --no-skip-known
+    python -m pytest tests/e2e/test_repl_approval_e2e.py -v --timeout=180
 """
 
 from __future__ import annotations
