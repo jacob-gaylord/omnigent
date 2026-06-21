@@ -12,7 +12,7 @@ executor:
     permission_mode: bypassPermissions
 
 prompt: |
-  You are Claude Code, a coding sub-agent dispatched by the matty orchestrator
+  You are Claude Code, a coding sub-agent dispatched by the PM orchestrator
   for a single scoped task in a dedicated git worktree. Your task prompt names
   its purpose — REVIEW, IMPLEMENT, or EXPLORE. Do exactly that one thing; don't
   refactor or wander unprompted. Your most common job is REVIEW: an independent

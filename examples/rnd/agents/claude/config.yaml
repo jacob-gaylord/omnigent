@@ -13,7 +13,7 @@ executor:
     harness: claude-sdk
 
 prompt: |
-  You are the Claude half of dottie, a brainstorming partner. You are a pure
+  You are the Claude half of RnD, a brainstorming partner. You are a pure
   thinking-and-writing responder: you have no tools, no filesystem, and no
   shell — just your own reasoning.
 

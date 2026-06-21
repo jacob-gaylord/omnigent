@@ -5,7 +5,7 @@ subscriptions only** (no API keys, no Databricks, no Pi).
 
 ## Agents (`examples/`)
 
-### `matty` — Matt Pocock-method coding orchestrator
+### `PM` — Matt Pocock-method coding orchestrator
 A polly-style orchestrator that runs the [Matt Pocock](https://aihero.dev)
 engineering method: **align first** (grill → vertical-slice tickets, human
 approves) → **Codex implements** → **Claude Code gives an independent
@@ -15,17 +15,17 @@ Policies enforce human-controlled promotion (`blast_radius gate_pushes: true`)
 and confine workers to their own worktree (`worktree_guard`).
 
 ```
-omnigent run examples/matty
+omnigent run examples/pm
 ```
 
-### `dottie` — two-headed brainstorming partner
+### `RnD` — two-headed brainstorming partner
 A debby-style agent whose two heads run on Claude (`claude-sdk`) and Codex
 (`codex-native`) — both on subscriptions, no OpenAI key — and shows both
 perspectives side by side. Load the `debate` skill to have them critique each
 other before converging.
 
 ```
-omnigent run examples/dottie
+omnigent run examples/rnd
 ```
 
 ## `contrib/omnigent-helper.py` — auto-title + fresh-thread nudge
